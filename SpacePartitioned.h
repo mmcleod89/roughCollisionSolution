@@ -1,5 +1,8 @@
 #pragma once
-void SetupBodies(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies);
+
+void TrivialSetup(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies);
+
+void RandomSetup(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies);
 
 void RemoveBody(std::vector<Body> &local_bodies, Body &b);
 

@@ -39,10 +39,10 @@ int main()
     double buffer_area = 4*Body::radius * HEIGHT;
     int recv_buffer_size = static_cast<int>(buffer_area / (M_PI*Body::radius*Body::radius));
     if(rank==0) printf("Expected maximum size of buffer is %d\n", recv_buffer_size);
-    Body recv_buffer[recv_buffer_size]; // expected maximum size of receive buffer
+    Body *recv_buffer = new Body[recv_buffer_size]; // expected maximum size of receive buffer
 
-    SetupBodies(X_OFFSET, HALF_WIDTH, local_bodies);
-
+    RandomSetup(X_OFFSET, HALF_WIDTH, local_bodies);
+    //TrivialSetup(X_OFFSET, HALF_WIDTH, local_bodies);
     
 
     bool keep_going = true;
@@ -77,13 +77,13 @@ int main()
         int num_bodies_received = 0;
         if(rank == 0)
         {
-            MPI_Send(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 1, MessageTags::bufferZone, MPI_COMM_WORLD);
+            MPI_Ssend(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 1, MessageTags::bufferZone, MPI_COMM_WORLD);
             num_bodies_received = ReceiveBodies(rank, n_proc, recv_buffer, recv_buffer_size);
         }
         else if(rank==1)
         {
             num_bodies_received = ReceiveBodies(rank, n_proc, recv_buffer, recv_buffer_size);
-            MPI_Send(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 0, MessageTags::bufferZone, MPI_COMM_WORLD);
+            MPI_Ssend(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 0, MessageTags::bufferZone, MPI_COMM_WORLD);
         }
 
         // adopt foreign bodies that are inside our region
@@ -92,7 +92,7 @@ int main()
             Body &b = recv_buffer[i];
             if(b.position[0] >= float(X_OFFSET) && b.position[0] < float(X_OFFSET + HALF_WIDTH))
             {
-                cout << "Rank " << rank << " adopted a new body " << b << endl;
+                //cout << "Rank " << rank << " adopted a new body " << b << endl;
                 local_bodies.push_back(b);
             }
         }
@@ -102,7 +102,7 @@ int main()
         {
             if(b.position[0] >= float(X_OFFSET+HALF_WIDTH) || b.position[0] < X_OFFSET)
             {
-                cout << "Rank " << rank << " abandoned a body " << b << endl;
+                //cout << "Rank " << rank << " abandoned a body " << b << endl;
                 RemoveBody(local_bodies, b);
             }
         }
@@ -114,7 +114,7 @@ int main()
             {
                 if (checkCollision(local_bodies[i], local_bodies[j]))
                 {
-                    cout << "Collision on rank " << rank << endl;
+                    //cout << "Collision on rank " << rank << endl;
                     reverse(local_bodies[i], local_bodies[j]);
                 }
             }
@@ -128,7 +128,7 @@ int main()
                 Body& foreign = recv_buffer[i];
                 if(checkCollision(local, foreign))
                 {
-                    cout << "Buffer collision on rank " << rank << endl;
+                    cout << "Buffer collision on rank " << rank << " " << local << ", " << foreign << endl;
                     for(auto &b : local_bodies)
                     {
                         if(b.id == local.id)
@@ -167,6 +167,8 @@ int main()
         }
 #endif
     }
+
+    delete[] recv_buffer;
 
     MPI_Finalize();
     return 0;
@@ -209,11 +211,19 @@ bool BeyondBoundary(const Body &b, const int rank, const unsigned int X_BUFFER)
     return (rank==0) ? b.position[0] > X_BUFFER : b.position[0] < X_BUFFER;
 }
 
-void SetupBodies(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies)
+void TrivialSetup(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies)
+{
+    Body b;
+    b.position = {(float) X_OFFSET + 25, 25, 0};
+    b.velocity = {(WIDTH - b.position[0]) / 12, 0, 0};
+    local_bodies.push_back(b);
+}
+
+void RandomSetup(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies)
 {
     {
 
-        int N = 20;
+        int N = 5;
         vector<Body> bodies;
         std::mt19937_64 rng;
         std::uniform_real_distribution<float> x_dist(5, 95);
