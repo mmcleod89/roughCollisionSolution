@@ -16,8 +16,9 @@ public:
     vec3 velocity;
     vec3 colour;
     unsigned int id;
+
+    constexpr static double radius = 1.0;
 private:
-    static double radius;
     static unsigned int current_id;
 };
 

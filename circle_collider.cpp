@@ -7,7 +7,6 @@
 
 using namespace std;
 
-double Body::radius = 1.0;
 unsigned int Body::current_id = 0;
 
 Body::Body()
