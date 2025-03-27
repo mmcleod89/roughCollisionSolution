@@ -1,14 +1,3 @@
-/* clear.c ... */
-
-/*
- * This example code creates an SDL window and renderer, and then clears the
- * window to a different color every frame, so you'll effectively get a window
- * that's smoothly fading between colors.
- *
- * This code is public domain. Feel free to use it for any purpose!
- */
-
-// #define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
 #ifdef GRAPHICS
 #include "graphics_utils.h"
 #endif 
@@ -21,9 +10,7 @@
 #include "SpacePartitioned.h"
 #include <cmath>
 #include <random>
-
-/* We will use this renderer to draw into this window every frame. */
-
+#include "MpiTags.h"
 
 int main()
 {
@@ -34,20 +21,29 @@ int main()
     MPI_Comm_size(MPI_COMM_WORLD, &n_proc);
 
     const unsigned int WIDTH_FULL = 100;
-    const unsigned int WIDTH = WIDTH_FULL / n_proc;
+    const unsigned int HALF_WIDTH = WIDTH_FULL / n_proc;
     const unsigned int HEIGHT = 50;
-    const unsigned int X_OFFSET = WIDTH * rank;
+    const unsigned int X_OFFSET = HALF_WIDTH * rank;
+    const unsigned int X_BUFFER = HALF_WIDTH + (rank==0 ? -2*Body::radius : 2*Body::radius);
+
+    printf("Rank %d has buffer pos %d\n", rank, X_BUFFER);
 
     #ifdef GRAPHICS
-    SetupRendering(rank, WIDTH, HEIGHT);
+    SetupRendering(rank, HALF_WIDTH, HEIGHT);
     #endif
 
     vector<Body> local_bodies;  // bodies in this parition
-    vector<Body> foreign_bodies;  // bodies in buffer of neighbouring partition
-    vector<Body> buffer_bodies;  // bodies to send to neighbour
-    SetupBodies(X_OFFSET, WIDTH, local_bodies);
+    vector<Body> transfer_list;  // bodies to send to neighbour
 
-    Body recv_buffer[100]; // max size of receive buffer
+    // Estimate the necessary size of receive buffer and allocate it
+    double buffer_area = 4*Body::radius * HEIGHT;
+    int recv_buffer_size = static_cast<int>(buffer_area / (M_PI*Body::radius*Body::radius));
+    if(rank==0) printf("Expected maximum size of buffer is %d\n", recv_buffer_size);
+    Body recv_buffer[recv_buffer_size]; // expected maximum size of receive buffer
+
+    SetupBodies(X_OFFSET, HALF_WIDTH, local_bodies);
+
+    
 
     bool keep_going = true;
     double t = 0;
@@ -56,6 +52,10 @@ int main()
     double dt = 0.1;
     while (keep_going && t < t_max)
     {
+        #ifdef GRAPHICS
+        auto frame_start = SDL_GetTicks();
+        #endif
+
         t = (steps++) * dt;
         // update positions
         for (auto &b : local_bodies)
@@ -63,33 +63,34 @@ int main()
             b.position = b.position + b.velocity * dt;
         }
 
-        // build buffer lists
-        float x_boundary = WIDTH;
-        buffer_bodies.clear();
+        // build list of particles beyond the buffer line
+        transfer_list.clear();
         for (auto &b : local_bodies)
         {
-            if(std::abs(b.position[0] - x_boundary) < 2.0)
+            if(BeyondBoundary(b, rank, X_BUFFER))
             {
-                buffer_bodies.push_back(b);
+                transfer_list.push_back(b);
             }
         }
 
-        // communicate the buffer lists
+        // communicate the buffer lists; ring communication to break deadlock
+        int num_bodies_received = 0;
         if(rank == 0)
         {
-            MPI_Send(buffer_bodies.data(), buffer_bodies.size() * sizeof(Body), MPI_BYTE, 1, 1, MPI_COMM_WORLD);
-            ReceiveBodies(rank, n_proc, recv_buffer, foreign_bodies);
+            MPI_Send(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 1, MessageTags::bufferZone, MPI_COMM_WORLD);
+            num_bodies_received = ReceiveBodies(rank, n_proc, recv_buffer, recv_buffer_size);
         }
         else if(rank==1)
         {
-            ReceiveBodies(rank, n_proc, recv_buffer, foreign_bodies);
-            MPI_Send(buffer_bodies.data(), buffer_bodies.size() * sizeof(Body), MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+            num_bodies_received = ReceiveBodies(rank, n_proc, recv_buffer, recv_buffer_size);
+            MPI_Send(transfer_list.data(), transfer_list.size() * sizeof(Body), MPI_BYTE, 0, MessageTags::bufferZone, MPI_COMM_WORLD);
         }
 
         // adopt foreign bodies that are inside our region
-        for(auto &b : foreign_bodies)
+        for(int i = 0; i < num_bodies_received; i++)
         {
-            if(b.position[0] >= float(X_OFFSET) && b.position[0] < float(X_OFFSET + WIDTH))
+            Body &b = recv_buffer[i];
+            if(b.position[0] >= float(X_OFFSET) && b.position[0] < float(X_OFFSET + HALF_WIDTH))
             {
                 cout << "Rank " << rank << " adopted a new body " << b << endl;
                 local_bodies.push_back(b);
@@ -97,9 +98,9 @@ int main()
         }
 
         //abandon bodies that leave our region
-        for(auto &b : buffer_bodies)
+        for(auto &b : transfer_list)
         {
-            if(b.position[0] >= float(X_OFFSET+WIDTH) || b.position[0] < X_OFFSET)
+            if(b.position[0] >= float(X_OFFSET+HALF_WIDTH) || b.position[0] < X_OFFSET)
             {
                 cout << "Rank " << rank << " abandoned a body " << b << endl;
                 RemoveBody(local_bodies, b);
@@ -120,10 +121,11 @@ int main()
         }
 
         // check for buffer collisions and bounce back
-        for(auto &local : buffer_bodies)
+        for(auto &local : transfer_list)
         {
-            for(auto &foreign : foreign_bodies)
+            for(int i = 0; i < num_bodies_received; i++)
             {
+                Body& foreign = recv_buffer[i];
                 if(checkCollision(local, foreign))
                 {
                     cout << "Buffer collision on rank " << rank << endl;
@@ -146,7 +148,13 @@ int main()
 
         // Only necessary for graphical rendering
 #ifdef GRAPHICS
-        RenderScene(local_bodies, X_OFFSET);
+        auto frame_time = SDL_GetTicks() - frame_start;
+        const unsigned int frame_min = 1000/60;
+        if(frame_time < frame_min)
+        {
+            SDL_Delay(frame_min - frame_time);
+        }
+        RenderScene(local_bodies, X_OFFSET, X_BUFFER, HEIGHT);
         if (rank == 0)
         {
             CheckForTerminationSignal(n_proc, rank, keep_going);
@@ -160,28 +168,28 @@ int main()
 #endif
     }
 
-    // exit
     MPI_Finalize();
-    return 0; /* end the program, reporting success to the OS. */
+    return 0;
 }
 
-void ReceiveBodies(int rank, int n_proc, Body recv_buffer[2], std::vector<Body> &foreign_bodies)
+int ReceiveBodies(int rank, int n_proc, Body *recv_buffer, int &max_size)
 {
     MPI_Status msg_status;
     int source = (rank + 1) % n_proc;
     MPI_Probe(source, 1, MPI_COMM_WORLD, &msg_status);
-    size_t msg_size = msg_status._ucount;
-    size_t num_bodies = msg_size / sizeof(Body);
-    //cout << "msg_size = " << msg_size << endl;
-
-    MPI_Recv(recv_buffer, msg_size, MPI_BYTE, source, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    foreign_bodies.clear();
-    //cout << "Rank " << rank << " received " << num_bodies << " bodies " << endl;
-    for (size_t i = 0; i < num_bodies; i++)
+    int msg_size = 0;
+    MPI_Get_count(&msg_status, MPI_BYTE, &msg_size);  // this is the size in bytes! 
+    int num_bodies = msg_size / sizeof(Body);  // this is the number of bodies
+    
+    // If it's too big we'll need to do a reallocation
+    if (num_bodies > max_size)
     {
-        //cout << "Rank " << rank << " received body " << recv_buffer[i] << endl;
-        foreign_bodies.push_back(recv_buffer[i]);
+        delete[] recv_buffer;
+        recv_buffer = new Body[num_bodies];
     }
+
+    MPI_Recv(recv_buffer, msg_size, MPI_BYTE, source, MessageTags::bufferZone, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    return num_bodies;
 }
 
 void RemoveBody(std::vector<Body> &local_bodies, Body &b)
@@ -194,6 +202,11 @@ void RemoveBody(std::vector<Body> &local_bodies, Body &b)
             break;
         }
     }
+}
+
+bool BeyondBoundary(const Body &b, const int rank, const unsigned int X_BUFFER)
+{
+    return (rank==0) ? b.position[0] > X_BUFFER : b.position[0] < X_BUFFER;
 }
 
 void SetupBodies(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vector<Body> &local_bodies)
@@ -226,13 +239,6 @@ void SetupBodies(const unsigned int X_OFFSET, const unsigned int WIDTH, std::vec
             if (!overlap) bodies.push_back(b);
         }
         
-        //Body b1, b2, b3, b4;
-        //b1.position = {30, 25, 0}; b1.velocity = {1, 0, 0}; b1.colour = {0,0,255};
-        //b2.position = {90, 25, 0}; b2.velocity = {-2, 0, 0}; b2.colour = {255,0,0};
-        //b3.position = {30, 10, 0}; b3.velocity = {1, 1, 0}; b3.colour = {0,255,255};
-        //b4.position = {70, 40, 0}; b4.velocity = {-1, -1, 0}; b4.colour = {0,0,0};
-        //vector<Body> bodies = {b1, b2, b3, b4};
-        // initial partitioning
         for (auto &b : bodies)
         {
             if (b.position[0] >= X_OFFSET && b.position[0] < X_OFFSET + WIDTH)
