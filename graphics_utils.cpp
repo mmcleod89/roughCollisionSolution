@@ -1,6 +1,8 @@
 #include "graphics_utils.h"
 #include <mpi.h>
+#include <cmath>
 #include <stdexcept>
+#include "MpiTags.h"
 
 using namespace std;
 
@@ -9,43 +11,32 @@ static SDL_Renderer *renderer = NULL;
 
 void DrawCircle(SDL_Renderer *renderer, float centreX, float centreY, float radius)
 {
-    const int diameter = (radius * 2);
-
-    int x = (radius - 1);
-    int y = 0;
-    int tx = 1;
-    int ty = 1;
-    int error = (tx - diameter);
-
-    std::vector<SDL_FPoint> points;
-
-    while (x >= y)
+    static vector<SDL_FPoint> circle_template;
+    static vector<SDL_FPoint> circle_points;
+    if(circle_template.empty())
     {
-        //  Each of the following renders an octant of the circle
-        points.push_back({centreX + x, centreY - y});
-        points.push_back({centreX + x, centreY + y});
-        points.push_back({centreX - x, centreY - y});
-        points.push_back({centreX - x, centreY + y});
-        points.push_back({centreX + y, centreY - x});
-        points.push_back({centreX + y, centreY + x});
-        points.push_back({centreX - y, centreY - x});
-        points.push_back({centreX - y, centreY + x});
-
-        if (error <= 0)
+        int pix_half_width = static_cast<int>(radius * 10);
+        int width = 2 * pix_half_width + 1;
+        for(int i = 0; i < width; i++)
         {
-            ++y;
-            error += ty;
-            ty += 2;
+            for(int j = 0; j < width; j++)
+            {
+                float x = pix_half_width - i;
+                float y = pix_half_width - j;
+                if (x*x + y*y <= radius*radius)
+                {
+                    circle_template.push_back({x, y});
+                }
+            }
         }
-
-        if (error > 0)
-        {
-            --x;
-            tx += 2;
-            error += (tx - diameter);
-        }
+        circle_points = vector<SDL_FPoint>(circle_template.size());
     }
-    SDL_RenderPoints(renderer, points.data(), points.size());
+
+    for(size_t i = 0; i < circle_template.size(); i++)
+    {
+        circle_points[i] = {circle_template[i].x+centreX, circle_template[i].y+centreY};
+    }
+    SDL_RenderPoints(renderer, circle_points.data(), circle_points.size());
 }
 
 void CheckForEvents(bool &keep_going, int n_proc, int rank)
@@ -62,7 +53,7 @@ void CheckForEvents(bool &keep_going, int n_proc, int rank)
     {
         if (i != rank)
         {
-            MPI_Send(&keep_going, 1, MPI::BOOL, i, 0, MPI_COMM_WORLD);
+            MPI_Send(&keep_going, 1, MPI::BOOL, i, MessageTags::terminate, MPI_COMM_WORLD);
         }
     }
 }
@@ -84,25 +75,31 @@ void SetupRendering(int rank, unsigned int w, unsigned int h)
     }
 }
 
-void RenderScene(std::vector<Body> &bodies, unsigned int X_OFFSET)
+void RenderScene(std::vector<Body> &bodies, unsigned int X_OFFSET, unsigned int X_BUFFER, unsigned int HEIGHT)
 {
     float x_offset = float(X_OFFSET);
-    /* choose the color for the frame we will draw. The sine wave trick makes it fade between colors smoothly. */
-    const float red = (float)(0.5 + 0.5);                                            // * SDL_sin(now));
-    const float green = (float)(0.5 + 0.5);                                          // * SDL_sin(now + SDL_PI_D * 2 / 3));
-    const float blue = (float)(0.5 + 0.5);                                           // * SDL_sin(now + SDL_PI_D * 4 / 3));
-    SDL_SetRenderDrawColorFloat(renderer, red, green, blue, SDL_ALPHA_OPAQUE_FLOAT); /* new color, full alpha. */
+
+    const float red = 1.0;
+    const float green = 1.0;
+    const float blue = 1.0;
+    SDL_SetRenderDrawColorFloat(renderer, red, green, blue, SDL_ALPHA_OPAQUE_FLOAT); 
 
     /* clear the window to the draw color. */
     SDL_RenderClear(renderer);
     
+    /* Draw the boundaries of the buffer zone */
+    SDL_SetRenderDrawColorFloat(renderer, 1.0, 0.0, 0.0, SDL_ALPHA_OPAQUE_FLOAT);
+    float buffer_x_pos = 10.0*(X_BUFFER - X_OFFSET);
+    SDL_RenderLine(renderer, buffer_x_pos, 0.0, buffer_x_pos, HEIGHT*10.0);
+
+    /* Draw the bodies */
     for (auto &b : bodies)
     {
         SDL_SetRenderDrawColorFloat(renderer, b.colour[0], b.colour[1], b.colour[2], SDL_ALPHA_OPAQUE_FLOAT);
         DrawCircle(renderer, (b.position[0] - x_offset) * 10, b.position[1] * 10, 10);
     }
 
-    /* put the newly-cleared rendering on the screen. */
+    /* Put it on the screen! */
     SDL_RenderPresent(renderer);
 }
 
@@ -112,7 +109,7 @@ void CheckForTerminationSignal(int n_proc, int rank, bool &keep_going)
     {
         if (i != rank)
         {
-            MPI_Recv(&keep_going, 1, MPI::BOOL, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(&keep_going, 1, MPI::BOOL, i, MessageTags::terminate, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         }
     }
 }

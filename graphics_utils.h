@@ -6,7 +6,7 @@
 #include <vector>
 #include "circle_collider.hpp"
 
-void RenderScene(std::vector<Body> &bodies, unsigned int x_offset=0);
+void RenderScene(std::vector<Body> &bodies, unsigned int x_offset, unsigned int x_buffer, unsigned int height);
 
 void SetupRendering(int rank, unsigned int w, unsigned int h);
 
